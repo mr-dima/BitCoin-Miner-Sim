@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BTC Miner</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: #14110d;
+    --panel: #1e1a14;
+    --line: #35291a;
+    --text: #f4ece0;
+    --muted: #a39580;
+    --btc: #f7931a;
+    --btc-dark: #b86a0c;
+    --ok: #7bd88f;
+  }
+  * { box-sizing: border-box; margin: 0; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: env(safe-area-inset-top, 0) 16px env(safe-area-inset-bottom, 0);
+    max-width: 520px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+  }
+  header { text-align: center; padding: 28px 0 20px; }
+  .coin { width: 96px; height: 96px; display: block; margin: 0 auto 18px; }
+  .coin.on { animation: spin 6s linear infinite; }
+  @keyframes spin { 50% { transform: rotateY(180deg); } 100% { transform: rotateY(360deg); } }
+  .balance { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.5px; }
+  .balance small { font-size: 18px; color: var(--btc); font-weight: 600; margin-left: 4px; }
+  .rate { margin-top: 8px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .rate b { color: var(--ok); font-weight: 600; }
+  h2 { font-size: 17px; margin: 8px 0 12px; }
+  .list { display: grid; gap: 10px; padding-bottom: 24px; }
+  .up {
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px;
+  }
+  .up .name { font-weight: 600; }
+  .up .meta { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .up button {
+    grid-row: 1 / span 2; grid-column: 2;
+    background: var(--btc); color: #1a1100; border: 0; border-radius: 10px;
+    padding: 10px 14px; font: inherit; font-weight: 700; font-size: 14px; font-variant-numeric: tabular-nums;
+    cursor: pointer; min-width: 112px;
+  }
+  .up button:active { background: var(--btc-dark); }
+  .up button:disabled { background: #3a3127; color: #7d705d; cursor: default; }
+  button:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  .status { text-align: center; color: var(--muted); font-size: 12px; padding: 4px 0 14px; margin-top: auto; }
+  @media (prefers-reduced-motion: reduce) { .coin.on { animation: none; } }
+</style>
+</head>
+<body>
+  <header>
+    <svg class="coin" id="coin" viewBox="0 0 100 100" role="img" aria-label="Bitcoin">
+      <circle cx="50" cy="50" r="48" fill="#f7931a"/>
+      <circle cx="50" cy="50" r="41" fill="none" stroke="#ffd08a" stroke-width="2" opacity=".6"/>
+      <text x="50" y="68" text-anchor="middle" font-size="58" font-weight="700" font-family="system-ui, Arial, sans-serif" fill="#fff">&#8383;</text>
+    </svg>
+    <div class="balance"><span id="bal">0.00000000</span><small>BTC</small></div>
+    <div class="rate">Майнится <b id="rate">0.00000001</b> BTC/сек</div>
+  </header>
+
+  <h2>Апгрейд фермы</h2>
+  <div class="list" id="list"></div>
+  <div class="status" id="status">Майнинг работает, пока игра открыта</div>
+
+<script>
+(function () {
+  var tg = window.Telegram && Telegram.WebApp;
+  if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor('#14110d'); tg.setBackgroundColor('#14110d'); } catch (e) {} }
+
+  // Все значения хранятся в сатоши: 1 BTC = 100 000 000 сатоши.
+  var SAT = 1e8;
+  var BASE_RATE = 1; // 1 сатоши/сек = 0.00000001 BTC/сек
+  var UPGRADES = [
+    { id: 'gpu',    name: 'Видеокарта',     cost: 100,     gain: 2,    mult: 1.15 },
+    { id: 'rig',    name: 'Майнинг-риг',    cost: 600,     gain: 10,   mult: 1.15 },
+    { id: 'asic',   name: 'ASIC-майнер',    cost: 4000,    gain: 60,   mult: 1.15 },
+    { id: 'farm',   name: 'Ферма',          cost: 30000,   gain: 400,  mult: 1.15 },
+    { id: 'center', name: 'Дата-центр',     cost: 200000,  gain: 3000, mult: 1.15 }
+  ];
+
+  var state = { sat: 0, levels: {} };
+  UPGRADES.forEach(function (u) { state.levels[u.id] = 0; });
+
+  function rate() {
+    var r = BASE_RATE;
+    UPGRADES.forEach(function (u) { r += u.gain * state.levels[u.id]; });
+    return r;
+  }
+  function costOf(u) { return Math.ceil(u.cost * Math.pow(u.mult, state.levels[u.id])); }
+  function fmt(sat) { return (sat / SAT).toFixed(8); }
+
+  // ---------- Сохранения: Telegram CloudStorage, запасной вариант — localStorage ----------
+  var KEY = 'btc_miner_v1';
+  var cloud = tg && tg.CloudStorage && tg.isVersionAtLeast && tg.isVersionAtLeast('6.9') ? tg.CloudStorage : null;
+
+  function save() {
+    var data = JSON.stringify(state);
+    try { localStorage.setItem(KEY, data); } catch (e) {}
+    if (cloud) cloud.setItem(KEY, data, function () {});
+  }
+  function load(done) {
+    function apply(raw) {
+      if (raw) {
+        try {
+          var s = JSON.parse(raw);
+          if (typeof s.sat === 'number') state.sat = s.sat;
+          UPGRADES.forEach(function (u) { state.levels[u.id] = (s.levels && s.levels[u.id]) | 0; });
+        } catch (e) {}
+      }
+      done();
+    }
+    if (cloud) {
+      cloud.getItem(KEY, function (err, val) {
+        if (!err && val) return apply(val);
+        var local = null; try { local = localStorage.getItem(KEY); } catch (e) {}
+        apply(local);
+      });
+    } else {
+      var local = null; try { local = localStorage.getItem(KEY); } catch (e) {}
+      apply(local);
+    }
+  }
+
+  // ---------- Интерфейс ----------
+  var elBal = document.getElementById('bal');
+  var elRate = document.getElementById('rate');
+  var elList = document.getElementById('list');
+  var elCoin = document.getElementById('coin');
+  var rows = {};
+
+  function buildList() {
+    UPGRADES.forEach(function (u) {
+      var row = document.createElement('div');
+      row.className = 'up';
+      row.innerHTML = '<div class="name"></div><div class="meta"></div><button type="button"></button>';
+      row.querySelector('button').addEventListener('click', function () { buy(u); });
+      elList.appendChild(row);
+      rows[u.id] = row;
+    });
+  }
+  function renderList() {
+    UPGRADES.forEach(function (u) {
+      var row = rows[u.id], c = costOf(u);
+      row.querySelector('.name').textContent = u.name + ' · ур. ' + state.levels[u.id];
+      row.querySelector('.meta').textContent = '+' + fmt(u.gain) + ' BTC/сек';
+      var b = row.querySelector('button');
+      b.textContent = fmt(c);
+      b.disabled = state.sat < c;
+    });
+  }
+  function render() {
+    elBal.textContent = fmt(state.sat);
+    elRate.textContent = fmt(rate());
+    UPGRADES.forEach(function (u) { rows[u.id].querySelector('button').disabled = state.sat < costOf(u); });
+  }
+  function buy(u) {
+    var c = costOf(u);
+    if (state.sat < c) return;
+    state.sat -= c;
+    state.levels[u.id]++;
+    if (tg && tg.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+    renderList(); render(); save();
+  }
+
+  // ---------- Майнинг: только пока игра открыта и видна ----------
+  var last = null, mining = false, sinceSave = 0;
+  function setMining(on) {
+    mining = on;
+    last = on ? performance.now() : null;
+    elCoin.classList.toggle('on', on);
+    document.getElementById('status').textContent = on ? 'Майнинг работает, пока игра открыта' : 'Майнинг на паузе';
+  }
+  function tick(now) {
+    if (mining && last !== null) {
+      var dt = (now - last) / 1000;
+      if (dt > 0 && dt < 5) { // слишком большие скачки времени не засчитываем
+        state.sat += rate() * dt;
+        sinceSave += dt;
+      }
+      last = now;
+      render();
+      if (sinceSave >= 10) { sinceSave = 0; save(); }
+    }
+    requestAnimationFrame(tick);
+  }
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { save(); setMining(false); } else { setMining(true); }
+  });
+  window.addEventListener('pagehide', save);
+  if (tg && tg.onEvent) {
+    tg.onEvent('activated', function () { setMining(true); });
+    tg.onEvent('deactivated', function () { save(); setMining(false); });
+  }
+
+  buildList();
+  load(function () {
+    renderList(); render(); setMining(true);
+    requestAnimationFrame(tick);
+  });
+})();
+</script>
+</body>
+</html>
